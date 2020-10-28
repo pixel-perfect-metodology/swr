@@ -220,6 +220,50 @@ describe('useSWR', () => {
     expect(container.textContent).toMatchInlineSnapshot(`"err err err"`)
   })
 
+  it('should broadcast isValidating', async () => {
+    function useBroadcast3() {
+      const { isValidating, revalidate } = useSWR(
+        'broadcast-3',
+        () => new Promise(res => setTimeout(res, 100)),
+        {
+          // need to turn of deduping otherwise
+          // revalidating will be ignored
+          dedupingInterval: 10
+        }
+      )
+      return { isValidating, revalidate }
+    }
+    function Initiator() {
+      const { isValidating, revalidate } = useBroadcast3()
+      useEffect(() => {
+        const timeout = setTimeout(() => {
+          revalidate()
+        }, 200)
+        return () => clearTimeout(timeout)
+      }, [])
+      return <>{isValidating ? 'true' : 'false'}</>
+    }
+    function Consumer() {
+      const { isValidating } = useBroadcast3()
+      return <>{isValidating ? 'true' : 'false'}</>
+    }
+    function Page() {
+      return (
+        <>
+          <Initiator /> <Consumer /> <Consumer />
+        </>
+      )
+    }
+    const { container } = render(<Page />)
+    expect(container.textContent).toMatchInlineSnapshot(`"true true true"`)
+    await act(() => new Promise(res => setTimeout(res, 100)))
+    expect(container.textContent).toMatchInlineSnapshot(`"false false false"`)
+    await act(() => new Promise(res => setTimeout(res, 100)))
+    expect(container.textContent).toMatchInlineSnapshot(`"true true true"`)
+    await act(() => new Promise(res => setTimeout(res, 100)))
+    expect(container.textContent).toMatchInlineSnapshot(`"false false false"`)
+  })
+
   it('should accept object args', async () => {
     const obj = { v: 'hello' }
     const arr = ['world']
@@ -508,6 +552,110 @@ describe('useSWR - refresh', () => {
       return new Promise(res => setTimeout(res, 110))
     })
     expect(container.firstChild.textContent).toMatchInlineSnapshot(`"count: 5"`)
+  })
+
+  it('should update data upon interval changes -- changes happened during revalidate', async () => {
+    let count = 0
+    const STOP_POLLING_THRESHOLD = 2
+    function Page() {
+      const [flag, setFlag] = useState(0)
+      const shouldPoll = flag < STOP_POLLING_THRESHOLD
+      const { data } = useSWR(
+        '/interval-changes-during-revalidate',
+        () => count++,
+        {
+          refreshInterval: shouldPoll ? 200 : 0,
+          dedupingInterval: 100,
+          onSuccess() {
+            setFlag(value => value + 1)
+          }
+        }
+      )
+      return (
+        <div onClick={() => setFlag(0)}>
+          count: {data} {flag}
+        </div>
+      )
+    }
+    const { container } = render(<Page />)
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count:  0"`
+    )
+
+    await waitForDomChange({ container }) // mount
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 0 1"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 200))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 1 2"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 200))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 1 2"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 200))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 1 2"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 200))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 1 2"`
+    )
+
+    await act(() => {
+      fireEvent.click(container.firstElementChild)
+      // it will setup a new 200ms timer
+      return new Promise(res => setTimeout(res, 100))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 1 0"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 100))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 2 1"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 200))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 3 2"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 200))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 3 2"`
+    )
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 200))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"count: 3 2"`
+    )
   })
 
   it('should allow use custom isEqual method', async () => {
@@ -885,6 +1033,37 @@ describe('useSWR - error', () => {
     await act(() => new Promise(res => setTimeout(res, 210))) // retry
     expect(container.firstChild.textContent).toMatchInlineSnapshot(`"error: 0"`)
   })
+
+  it('should not clear error during revalidating until fetcher is finished successfully', async () => {
+    const errors = []
+    const key = 'error-9'
+    function Page() {
+      const { error } = useSWR(
+        key,
+        () => {
+          return new Promise((_, rej) => rej(new Error('error')))
+        },
+        {
+          errorRetryCount: 0,
+          errorRetryInterval: 0,
+          dedupingInterval: 0
+        }
+      )
+      useEffect(() => {
+        errors.push(error ? error.message : null)
+      }, [error])
+
+      return <div>hello, {error ? error.message : null}</div>
+    }
+    const { container } = render(<Page />)
+    await waitForDomChange({ container })
+    await act(() => {
+      return mutate(key, undefined, true)
+    })
+    // initial -> first error -> mutate -> receive another error
+    // error won't be cleared during revalidation
+    expect(errors).toEqual([null, 'error', 'error'])
+  })
 })
 
 describe('useSWR - focus', () => {
@@ -935,6 +1114,172 @@ describe('useSWR - focus', () => {
       return new Promise(res => setTimeout(res, 1))
     })
     expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+  })
+  it('revalidateOnFocus shoule be stateful', async () => {
+    let value = 0
+
+    function Page() {
+      const [revalidateOnFocus, toggle] = useState(false)
+      const { data } = useSWR('dynamic-revalidateOnFocus', () => value++, {
+        dedupingInterval: 0,
+        revalidateOnFocus,
+        focusThrottleInterval: 0
+      })
+      return <div onClick={() => toggle(s => !s)}>data: {data}</div>
+    }
+    const { container } = render(<Page />)
+
+    // hydration
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: "`)
+    await waitForDomChange({ container }) // mount
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+    await act(() => {
+      // trigger revalidation
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+    // data should not change
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+
+    // change revalidateOnFocus to true
+    fireEvent.click(container.firstElementChild)
+
+    await act(() => {
+      // trigger revalidation
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+    // data should update
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 1"`)
+
+    await act(() => {
+      // trigger revalidation
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+    // data should update
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 2"`)
+
+    // change revalidateOnFocus to false
+    fireEvent.click(container.firstElementChild)
+    await act(() => {
+      // trigger revalidation
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+    // data should not change
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 2"`)
+  })
+
+  it('focusThrottleInterval should work', async () => {
+    let value = 0
+
+    function Page() {
+      const { data } = useSWR(
+        'focusThrottleInterval should work',
+        () => value++,
+        {
+          dedupingInterval: 0,
+          revalidateOnFocus: true,
+          focusThrottleInterval: 200
+        }
+      )
+      return <div>data: {data}</div>
+    }
+    const { container } = render(<Page />)
+
+    // hydration
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: "`)
+    await waitForDomChange({ container }) // mount
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+
+    await act(() => {
+      // trigger revalidation
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 210))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 1"`)
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 2"`)
+  })
+
+  it('focusThrottleInterval should be stateful', async () => {
+    let value = 0
+
+    function Page() {
+      const [focusThrottleInterval, setInterval] = useState(200)
+      const { data } = useSWR(
+        'focusThrottleInterval should be stateful',
+        () => value++,
+        {
+          dedupingInterval: 0,
+          revalidateOnFocus: true,
+          focusThrottleInterval
+        }
+      )
+      return <div onClick={() => setInterval(s => s + 100)}>data: {data}</div>
+    }
+    const { container } = render(<Page />)
+
+    // hydration
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: "`)
+    await waitForDomChange({ container }) // mount
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 0"`)
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 210))
+    })
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 210))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 2"`)
+    fireEvent.click(container.firstElementChild)
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 210))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 3"`)
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 100))
+    })
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 310))
+    })
+
+    await act(() => {
+      fireEvent.focus(window)
+      return new Promise(res => setTimeout(res, 1))
+    })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"data: 5"`)
   })
 })
 
@@ -1330,6 +1675,36 @@ describe('useSWR - local mutation', () => {
     })
     cacheError = cache.get(keyErr)
     expect(cacheError).toMatchInlineSnapshot(`undefined`)
+  })
+
+  it('should keep the `mutate` function referential equal', async () => {
+    const refs = []
+
+    function Section() {
+      const [key, setKey] = useState(null)
+      const { data, mutate: boundMutate } = useSWR(
+        key,
+        () => new Promise(res => setTimeout(() => res(1), 10))
+      )
+
+      useEffect(() => {
+        const timeout = setTimeout(() => setKey('mutate-5'), 100)
+        return () => clearTimeout(timeout)
+      }, [])
+
+      refs.push(boundMutate)
+      return <div>{data}</div>
+    }
+
+    render(<Section />)
+    await act(() => new Promise(res => setTimeout(res, 120)))
+    mutate('mutate-5', 2)
+    await act(() => new Promise(res => setTimeout(res, 50)))
+
+    // check all `setSize`s are referential equal.
+    for (let ref of refs) {
+      expect(ref).toEqual(refs[0])
+    }
   })
 })
 
@@ -1751,5 +2126,257 @@ describe('useSWR - key', () => {
     expect(container.firstChild.textContent).toMatchInlineSnapshot(
       `"hello, 2:b"`
     )
+  })
+
+  it('should revalidate if a function key changes identity', async () => {
+    const closureFunctions: { [key: string]: () => Promise<string> } = {}
+
+    const closureFactory = id => {
+      if (closureFunctions[id]) return closureFunctions[id]
+      closureFunctions[id] = () => Promise.resolve(`data-${id}`)
+      return closureFunctions[id]
+    }
+
+    let updateId
+
+    const fetcher = fn => fn()
+
+    function Page() {
+      const [id, setId] = React.useState('first')
+      updateId = setId
+      const fnWithClosure = closureFactory(id)
+      const { data } = useSWR([fnWithClosure], fetcher)
+
+      return <div>{data}</div>
+    }
+
+    const { container } = render(<Page />)
+    const closureSpy = jest.spyOn(closureFunctions, 'first')
+    await waitForDomChange({ container })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"data-first"`
+    )
+    expect(closureSpy).toHaveBeenCalledTimes(1)
+
+    // update, but don't change the id.
+    // Function identity should stay the same, and useSWR should not call the function again.
+    await act(() => updateId('first'))
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"data-first"`
+    )
+    expect(closureSpy).toHaveBeenCalledTimes(1)
+
+    await act(() => updateId('second'))
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"data-second"`
+    )
+  })
+})
+
+describe('useSWR - config callbacks', () => {
+  it('should trigger the onSuccess event with the latest version of the onSuccess callback', async () => {
+    let state = null
+    let count = 0
+
+    function Page(props: { text: string }) {
+      const { data, revalidate } = useSWR(
+        'config callbacks - onSuccess',
+        () => new Promise(res => setTimeout(() => res(count++), 200)),
+        { onSuccess: () => (state = props.text) }
+      )
+      return (
+        <div onClick={revalidate}>
+          hello, {data}, {props.text}
+        </div>
+      )
+    }
+    const { container, rerender } = render(<Page text={'a'} />)
+    // the onSuccess callback does not trigger yet, the state still null.
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, , a"`
+    )
+    expect(state).toEqual(null)
+
+    await waitForDomChange({ container })
+    // since the promise resolved, the onSuccess callback assign `props.text` to `state`
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 0, a"`
+    )
+    expect(state).toEqual('a')
+
+    // props changed, but the onSuccess callback does not trigger yet, `state` is same as before
+    rerender(<Page text={'b'} />)
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 0, b"`
+    )
+    expect(state).toEqual('a')
+
+    await act(() => {
+      // trigger revalidation, this would re-trigger the onSuccess callback
+      fireEvent.click(container.firstElementChild)
+      return new Promise(res => setTimeout(res, 201))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 1, b"`
+    )
+    // the onSuccess callback should capture the latest `props.text`
+    expect(state).toEqual('b')
+  })
+
+  it('should trigger the onError event with the latest version of the onError callback', async () => {
+    let state = null
+    let count = 0
+
+    function Page(props: { text: string }) {
+      const { data, revalidate, error } = useSWR(
+        'config callbacks - onError',
+        () =>
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error(`Error: ${count++}`)), 200)
+          ),
+        { onError: () => (state = props.text) }
+      )
+      if (error)
+        return (
+          <div title={props.text} onClick={revalidate}>
+            {error.message}
+          </div>
+        )
+      return (
+        <div onClick={revalidate}>
+          hello, {data}, {props.text}
+        </div>
+      )
+    }
+
+    const { container, rerender } = render(<Page text="a" />)
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, , a"`
+    )
+    expect(state).toEqual(null)
+
+    await waitForDomChange({ container })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"Error: 0"`)
+    expect(state).toEqual('a')
+
+    // props changed, but the onError callback doese not trigger yet.
+    rerender(<Page text="b" />)
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"Error: 0"`)
+    expect(container.firstElementChild.getAttribute('title')).toEqual('b')
+    expect(state).toEqual('a')
+
+    await act(() => {
+      fireEvent.click(container.firstElementChild)
+      return new Promise(res => setTimeout(res, 201))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"Error: 1"`)
+    expect(container.firstElementChild.getAttribute('title')).toEqual('b')
+    expect(state).toEqual('b')
+  })
+
+  it('should trigger the onErrorRetry event with the latest version of the onErrorRetry callback', async () => {
+    let state = null
+    let count = 0
+    function Page(props: { text: string }) {
+      const { data, error } = useSWR(
+        'config callbacks - onErrorRetry',
+        () =>
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error(`Error: ${count++}`)), 200)
+          ),
+        {
+          onErrorRetry: (_, __, ___, revalidate, revalidateOpts) => {
+            state = props.text
+            setTimeout(() => revalidate(revalidateOpts), 100)
+          }
+        }
+      )
+      if (error) return <div title={props.text}>{error.message}</div>
+      return (
+        <div>
+          hello, {data}, {props.text}
+        </div>
+      )
+    }
+
+    const { container, rerender } = render(<Page text="a" />)
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, , a"`
+    )
+    expect(state).toEqual(null)
+
+    await waitForDomChange({ container })
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"Error: 0"`)
+    expect(container.firstElementChild.getAttribute('title')).toEqual('a')
+    expect(state).toEqual('a')
+
+    // since the onErrorRetry schedule a timer to trigger revalidation, update props.text now
+    rerender(<Page text="b" />)
+    // not revalidate yet.
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"Error: 0"`)
+    expect(container.firstElementChild.getAttribute('title')).toEqual('b')
+    expect(state).toEqual('a')
+
+    await act(() => {
+      return new Promise(res => setTimeout(res, 301))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(`"Error: 1"`)
+    expect(container.firstElementChild.getAttribute('title')).toEqual('b')
+    expect(state).toEqual('b')
+  })
+
+  it('should trigger the onLoadingSlow and onSuccess event with the lastest version of the callbacks', async () => {
+    let state = null
+    let count = 0
+
+    function Page(props: { text: string }) {
+      const { data } = useSWR(
+        'config callbacks - onLoadingSlow',
+        () => new Promise(res => setTimeout(() => res(count++), 200)),
+        {
+          onLoadingSlow: () => {
+            state = props.text
+          },
+          onSuccess: () => {
+            state = props.text
+          },
+          loadingTimeout: 100
+        }
+      )
+      return (
+        <div>
+          hello, {data}, {props.text}
+        </div>
+      )
+    }
+
+    const { container, rerender } = render(<Page text="a" />)
+
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, , a"`
+    )
+    expect(state).toEqual(null)
+
+    await act(() => {
+      // wait 100ms to trigger onLoadingSlow event, but not success yet.
+      return new Promise(res => setTimeout(res, 101))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, , a"`
+    )
+    expect(state).toEqual('a')
+    rerender(<Page text="b" />)
+
+    await act(() => {
+      // now trigger onSuccess event
+      return new Promise(res => setTimeout(res, 100))
+    })
+    expect(container.firstChild.textContent).toMatchInlineSnapshot(
+      `"hello, 0, b"`
+    )
+    expect(state).toEqual('b')
   })
 })
